@@ -701,7 +701,9 @@ class Manager extends EventEmitter {
 
   async getJobBySingletonKey(singletonKey, options = {}) {
     const db = options.db || this.db;
-    const result1 = await db.executeSql(this.getJobBySingletonKeyCommand, [id]);
+    const result1 = await db.executeSql(this.getJobBySingletonKeyCommand, [
+      singletonKey,
+    ]);
 
     if (result1 && result1.rows && result1.rows.length === 1) {
       return result1.rows[0];
@@ -709,7 +711,7 @@ class Manager extends EventEmitter {
 
     const result2 = await db.executeSql(
       this.getArchivedJobBySingletonKeyCommand,
-      [id]
+      [singletonKey]
     );
 
     if (result2 && result2.rows && result2.rows.length === 1) {
