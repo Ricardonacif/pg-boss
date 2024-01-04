@@ -53,6 +53,7 @@ module.exports = {
   locked,
   assertMigration,
   getArchivedJobById,
+  getArchivedJobBySingletonKey,
   getJobById,
   getJobBySingletonKey,
   states: { ...states },
@@ -717,12 +718,16 @@ function getJobById(schema) {
   return getJobByTableAndId(schema, "job");
 }
 
+function getArchivedJobById(schema) {
+  return getJobByTableAndId(schema, "archive");
+}
+
 function getJobBySingletonKey(schema) {
   return getJobByTableAndSingletonKey(schema, "job");
 }
 
-function getArchivedJobById(schema) {
-  return getJobByTableAndId(schema, "archive");
+function getArchivedJobBySingletonKey(schema) {
+  return getJobByTableAndSingletonKey(schema, "archive");
 }
 
 function getJobByTableAndId(schema, table) {
