@@ -58,6 +58,7 @@
   - [`notifyWorker(id)`](#notifyworkerid)
   - [`getQueueSize(name [, options])`](#getqueuesizename--options)
   - [`getJobById(id, options)`](#getjobbyidid-options)
+  - [`getjobbysingletonkey-options(id, options)`](#getjobbysingletonkey-optionsid-options)
   - [`deleteQueue(name)`](#deletequeuename)
   - [`deleteAllQueues()`](#deleteallqueues)
   - [`clearStorage()`](#clearstorage)
@@ -1084,6 +1085,10 @@ As an example, the following options object include active jobs along with creat
 ## `getJobById(id, options)`
 
 Retrieves a job with all metadata by id in either the primary or archive storage.
+
+## `getjobbysingletonkey-options(id, options)`
+
+Retrieves a job with all metadata by the unique key passed as singletonKey option during enqueueing in either the primary or archive storage.
 
 ## `deleteQueue(name)`
 

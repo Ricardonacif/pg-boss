@@ -1,69 +1,82 @@
-const assert = require('assert')
-const EventEmitter = require('events')
-const delay = require('delay')
-const uuid = require('uuid')
-const debounce = require('lodash.debounce')
-const { serializeError: stringify } = require('serialize-error')
-const Attorney = require('./attorney')
-const Worker = require('./worker')
-const Db = require('./db')
-const pMap = require('p-map')
+const assert = require("assert");
+const EventEmitter = require("events");
+const delay = require("delay");
+const uuid = require("uuid");
+const debounce = require("lodash.debounce");
+const { serializeError: stringify } = require("serialize-error");
+const Attorney = require("./attorney");
+const Worker = require("./worker");
+const Db = require("./db");
+const pMap = require("p-map");
 
-const { QUEUES: BOSS_QUEUES } = require('./boss')
-const { QUEUES: TIMEKEEPER_QUEUES } = require('./timekeeper')
+const { QUEUES: BOSS_QUEUES } = require("./boss");
+const { QUEUES: TIMEKEEPER_QUEUES } = require("./timekeeper");
 
-const INTERNAL_QUEUES = Object.values(BOSS_QUEUES).concat(Object.values(TIMEKEEPER_QUEUES)).reduce((acc, i) => ({ ...acc, [i]: i }), {})
+const INTERNAL_QUEUES = Object.values(BOSS_QUEUES)
+  .concat(Object.values(TIMEKEEPER_QUEUES))
+  .reduce((acc, i) => ({ ...acc, [i]: i }), {});
 
-const plans = require('./plans')
-const { COMPLETION_JOB_PREFIX, SINGLETON_QUEUE_KEY } = plans
+const plans = require("./plans");
+const { COMPLETION_JOB_PREFIX, SINGLETON_QUEUE_KEY } = plans;
 
-const WIP_EVENT_INTERVAL = 2000
-const WIP_DEBOUNCE_OPTIONS = { leading: true, trailing: true, maxWait: WIP_EVENT_INTERVAL }
+const WIP_EVENT_INTERVAL = 2000;
+const WIP_DEBOUNCE_OPTIONS = {
+  leading: true,
+  trailing: true,
+  maxWait: WIP_EVENT_INTERVAL,
+};
 
 const events = {
-  error: 'error',
-  wip: 'wip'
-}
+  error: "error",
+  wip: "wip",
+};
 
 const resolveWithinSeconds = async (promise, seconds) => {
-  const timeout = Math.max(1, seconds) * 1000
-  const reject = delay.reject(timeout, { value: new Error(`handler execution exceeded ${timeout}ms`) })
+  const timeout = Math.max(1, seconds) * 1000;
+  const reject = delay.reject(timeout, {
+    value: new Error(`handler execution exceeded ${timeout}ms`),
+  });
 
-  let result
+  let result;
 
   try {
-    result = await Promise.race([promise, reject])
+    result = await Promise.race([promise, reject]);
   } finally {
     try {
-      reject.clear()
+      reject.clear();
     } catch {}
   }
 
-  return result
-}
+  return result;
+};
 
 class Manager extends EventEmitter {
-  constructor (db, config) {
-    super()
+  constructor(db, config) {
+    super();
 
-    this.config = config
-    this.db = db
+    this.config = config;
+    this.db = db;
 
-    this.events = events
-    this.workers = new Map()
+    this.events = events;
+    this.workers = new Map();
 
-    this.nextJobCommand = plans.fetchNextJob(config.schema)
-    this.insertJobCommand = plans.insertJob(config.schema)
-    this.insertJobsCommand = plans.insertJobs(config.schema)
-    this.completeJobsCommand = plans.completeJobs(config.schema)
-    this.cancelJobsCommand = plans.cancelJobs(config.schema)
-    this.resumeJobsCommand = plans.resumeJobs(config.schema)
-    this.failJobsCommand = plans.failJobs(config.schema)
-    this.getJobByIdCommand = plans.getJobById(config.schema)
-    this.getArchivedJobByIdCommand = plans.getArchivedJobById(config.schema)
-    this.subscribeCommand = plans.subscribe(config.schema)
-    this.unsubscribeCommand = plans.unsubscribe(config.schema)
-    this.getQueuesForEventCommand = plans.getQueuesForEvent(config.schema)
+    this.nextJobCommand = plans.fetchNextJob(config.schema);
+    this.insertJobCommand = plans.insertJob(config.schema);
+    this.insertJobsCommand = plans.insertJobs(config.schema);
+    this.completeJobsCommand = plans.completeJobs(config.schema);
+    this.cancelJobsCommand = plans.cancelJobs(config.schema);
+    this.resumeJobsCommand = plans.resumeJobs(config.schema);
+    this.failJobsCommand = plans.failJobs(config.schema);
+    this.getJobByIdCommand = plans.getJobById(config.schema);
+    this.getJobBySingletonKeyCommand = plans.getJobBySingletonKey(
+      config.schema
+    );
+    this.getArchivedJobByIdCommand = plans.getArchivedJobById(config.schema);
+    this.getArchivedJobBySingletonKeyCommand =
+      plans.getArchivedJobBySingletonKey(config.schema);
+    this.subscribeCommand = plans.subscribe(config.schema);
+    this.unsubscribeCommand = plans.unsubscribe(config.schema);
+    this.getQueuesForEventCommand = plans.getQueuesForEvent(config.schema);
 
     // exported api to index
     this.functions = [
@@ -92,91 +105,108 @@ class Manager extends EventEmitter {
       this.deleteAllQueues,
       this.clearStorage,
       this.getQueueSize,
-      this.getJobById
-    ]
+      this.getJobById,
+      this.getJobBySingletonKey,
+    ];
 
-    this.emitWipThrottled = debounce(() => this.emit(events.wip, this.getWipData()), WIP_EVENT_INTERVAL, WIP_DEBOUNCE_OPTIONS)
+    this.emitWipThrottled = debounce(
+      () => this.emit(events.wip, this.getWipData()),
+      WIP_EVENT_INTERVAL,
+      WIP_DEBOUNCE_OPTIONS
+    );
   }
 
-  start () {
-    this.stopping = false
+  start() {
+    this.stopping = false;
   }
 
-  async stop () {
-    this.stopping = true
+  async stop() {
+    this.stopping = true;
 
     for (const sub of this.workers.values()) {
       if (!INTERNAL_QUEUES[sub.name]) {
-        await this.offWork(sub.name)
+        await this.offWork(sub.name);
       }
     }
   }
 
-  async work (name, ...args) {
-    const { options, callback } = Attorney.checkWorkArgs(name, args, this.config)
-    return await this.watch(name, options, callback)
+  async work(name, ...args) {
+    const { options, callback } = Attorney.checkWorkArgs(
+      name,
+      args,
+      this.config
+    );
+    return await this.watch(name, options, callback);
   }
 
-  async onComplete (name, ...args) {
-    const { options, callback } = Attorney.checkWorkArgs(name, args, this.config)
-    return await this.watch(COMPLETION_JOB_PREFIX + name, options, callback)
+  async onComplete(name, ...args) {
+    const { options, callback } = Attorney.checkWorkArgs(
+      name,
+      args,
+      this.config
+    );
+    return await this.watch(COMPLETION_JOB_PREFIX + name, options, callback);
   }
 
-  addWorker (worker) {
-    this.workers.set(worker.id, worker)
+  addWorker(worker) {
+    this.workers.set(worker.id, worker);
   }
 
-  removeWorker (worker) {
-    this.workers.delete(worker.id)
+  removeWorker(worker) {
+    this.workers.delete(worker.id);
   }
 
-  getWorkers () {
-    return Array.from(this.workers.values())
+  getWorkers() {
+    return Array.from(this.workers.values());
   }
 
-  emitWip (name) {
+  emitWip(name) {
     if (!INTERNAL_QUEUES[name]) {
-      this.emitWipThrottled()
+      this.emitWipThrottled();
     }
   }
 
-  getWipData (options = {}) {
-    const { includeInternal = false } = options
+  getWipData(options = {}) {
+    const { includeInternal = false } = options;
 
     const data = this.getWorkers()
-      .map(({
-        id,
-        name,
-        options,
-        state,
-        jobs,
-        createdOn,
-        lastFetchedOn,
-        lastJobStartedOn,
-        lastJobEndedOn,
-        lastError,
-        lastErrorOn
-      }) => ({
-        id,
-        name,
-        options,
-        state,
-        count: jobs.length,
-        createdOn,
-        lastFetchedOn,
-        lastJobStartedOn,
-        lastJobEndedOn,
-        lastError,
-        lastErrorOn
-      }))
-      .filter(i => i.count > 0 && (!INTERNAL_QUEUES[i.name] || includeInternal))
+      .map(
+        ({
+          id,
+          name,
+          options,
+          state,
+          jobs,
+          createdOn,
+          lastFetchedOn,
+          lastJobStartedOn,
+          lastJobEndedOn,
+          lastError,
+          lastErrorOn,
+        }) => ({
+          id,
+          name,
+          options,
+          state,
+          count: jobs.length,
+          createdOn,
+          lastFetchedOn,
+          lastJobStartedOn,
+          lastJobEndedOn,
+          lastError,
+          lastErrorOn,
+        })
+      )
+      .filter(
+        (i) => i.count > 0 && (!INTERNAL_QUEUES[i.name] || includeInternal)
+      );
 
-    return data
+    return data;
   }
 
-  async watch (name, options, callback) {
+  async watch(name, options, callback) {
     if (this.stopping) {
-      throw new Error('Workers are disabled. pg-boss is stopping.')
+      throw new Error("Workers are disabled. pg-boss is stopping.");
     }
 
     const {
@@ -186,214 +216,251 @@ class Manager extends EventEmitter {
       teamConcurrency = 1,
       teamRefill: refill = false,
       includeMetadata = false,
-      enforceSingletonQueueActiveLimit = false
-    } = options
+      enforceSingletonQueueActiveLimit = false,
+    } = options;
 
-    const id = uuid.v4()
+    const id = uuid.v4();
 
-    let queueSize = 0
+    let queueSize = 0;
 
-    let refillTeamPromise
-    let resolveRefillTeam
+    let refillTeamPromise;
+    let resolveRefillTeam;
 
     // Setup a promise that onFetch can await for when at least one
     // job is finished and so the team is ready to be topped up
     const createTeamRefillPromise = () => {
-      refillTeamPromise = new Promise((resolve) => { resolveRefillTeam = resolve })
-    }
+      refillTeamPromise = new Promise((resolve) => {
+        resolveRefillTeam = resolve;
+      });
+    };
 
-    createTeamRefillPromise()
+    createTeamRefillPromise();
 
     const onRefill = () => {
-      queueSize--
-      resolveRefillTeam()
-      createTeamRefillPromise()
-    }
+      queueSize--;
+      resolveRefillTeam();
+      createTeamRefillPromise();
+    };
 
-    const fetch = () => this.fetch(name, batchSize || (teamSize - queueSize), { includeMetadata, enforceSingletonQueueActiveLimit })
+    const fetch = () =>
+      this.fetch(name, batchSize || teamSize - queueSize, {
+        includeMetadata,
+        enforceSingletonQueueActiveLimit,
+      });
 
     const onFetch = async (jobs) => {
       if (this.config.__test__throw_worker) {
-        throw new Error('__test__throw_worker')
+        throw new Error("__test__throw_worker");
       }
 
-      this.emitWip(name)
+      this.emitWip(name);
 
       if (batchSize) {
-        const maxExpiration = jobs.reduce((acc, i) => Math.max(acc, i.expire_in_seconds), 0)
+        const maxExpiration = jobs.reduce(
+          (acc, i) => Math.max(acc, i.expire_in_seconds),
+          0
+        );
 
         await resolveWithinSeconds(Promise.all([callback(jobs)]), maxExpiration)
-          .then(() => this.complete(jobs.map(job => job.id)))
-          .catch(err => this.fail(jobs.map(job => job.id), err))
+          .then(() => this.complete(jobs.map((job) => job.id)))
+          .catch((err) =>
+            this.fail(
+              jobs.map((job) => job.id),
+              err
+            )
+          );
       } else {
         if (refill) {
-          queueSize += jobs.length || 1
+          queueSize += jobs.length || 1;
         }
 
-        const allTeamPromise = pMap(jobs, job =>
-          resolveWithinSeconds(callback(job), job.expire_in_seconds)
-            .then(result => this.complete(job.id, result))
-            .catch(err => this.fail(job.id, err))
-            .then(() => refill ? onRefill() : null)
-        , { concurrency: teamConcurrency }
-        ).catch(() => {}) // allow promises & non-promises to live together in harmony
+        const allTeamPromise = pMap(
+          jobs,
+          (job) =>
+            resolveWithinSeconds(callback(job), job.expire_in_seconds)
+              .then((result) => this.complete(job.id, result))
+              .catch((err) => this.fail(job.id, err))
+              .then(() => (refill ? onRefill() : null)),
+          { concurrency: teamConcurrency }
+        ).catch(() => {}); // allow promises & non-promises to live together in harmony
 
         if (refill) {
           if (queueSize < teamSize) {
-            return
+            return;
           } else {
-            await refillTeamPromise
+            await refillTeamPromise;
           }
         } else {
-          await allTeamPromise
+          await allTeamPromise;
         }
       }
 
-      this.emitWip(name)
-    }
+      this.emitWip(name);
+    };
 
-    const onError = error => {
-      this.emit(events.error, { ...error, message: error.message, stack: error.stack, queue: name, worker: id })
-    }
+    const onError = (error) => {
+      this.emit(events.error, {
+        ...error,
+        message: error.message,
+        stack: error.stack,
+        queue: name,
+        worker: id,
+      });
+    };
 
-    const worker = new Worker({ id, name, options, interval, fetch, onFetch, onError })
+    const worker = new Worker({
+      id,
+      name,
+      options,
+      interval,
+      fetch,
+      onFetch,
+      onError,
+    });
 
-    this.addWorker(worker)
+    this.addWorker(worker);
 
-    worker.start()
+    worker.start();
 
-    return id
+    return id;
   }
 
-  async offWork (value) {
-    assert(value, 'Missing required argument')
+  async offWork(value) {
+    assert(value, "Missing required argument");
 
-    const query = (typeof value === 'string')
-      ? { filter: i => i.name === value }
-      : (typeof value === 'object' && value.id)
-          ? { filter: i => i.id === value.id }
-          : null
+    const query =
+      typeof value === "string"
+        ? { filter: (i) => i.name === value }
+        : typeof value === "object" && value.id
+        ? { filter: (i) => i.id === value.id }
+        : null;
 
-    assert(query, 'Invalid argument. Expected string or object: { id }')
+    assert(query, "Invalid argument. Expected string or object: { id }");
 
-    const workers = this.getWorkers().filter(i => query.filter(i) && !i.stopping && !i.stopped)
+    const workers = this.getWorkers().filter(
+      (i) => query.filter(i) && !i.stopping && !i.stopped
+    );
 
     if (workers.length === 0) {
-      return
+      return;
     }
 
     for (const worker of workers) {
-      worker.stop()
+      worker.stop();
     }
 
     setImmediate(async () => {
-      while (!workers.every(w => w.stopped)) {
-        await delay(1000)
+      while (!workers.every((w) => w.stopped)) {
+        await delay(1000);
       }
 
       for (const worker of workers) {
-        this.removeWorker(worker)
+        this.removeWorker(worker);
       }
-    })
+    });
   }
 
-  notifyWorker (workerId) {
+  notifyWorker(workerId) {
     if (this.workers.has(workerId)) {
-      this.workers.get(workerId).notify()
+      this.workers.get(workerId).notify();
     }
   }
 
-  async subscribe (event, name) {
-    assert(event, 'Missing required argument')
-    assert(name, 'Missing required argument')
+  async subscribe(event, name) {
+    assert(event, "Missing required argument");
+    assert(name, "Missing required argument");
 
-    return await this.db.executeSql(this.subscribeCommand, [event, name])
+    return await this.db.executeSql(this.subscribeCommand, [event, name]);
   }
 
-  async unsubscribe (event, name) {
-    assert(event, 'Missing required argument')
-    assert(name, 'Missing required argument')
+  async unsubscribe(event, name) {
+    assert(event, "Missing required argument");
+    assert(name, "Missing required argument");
 
-    return await this.db.executeSql(this.unsubscribeCommand, [event, name])
+    return await this.db.executeSql(this.unsubscribeCommand, [event, name]);
   }
 
-  async publish (event, ...args) {
-    assert(event, 'Missing required argument')
+  async publish(event, ...args) {
+    assert(event, "Missing required argument");
 
-    const result = await this.db.executeSql(this.getQueuesForEventCommand, [event])
+    const result = await this.db.executeSql(this.getQueuesForEventCommand, [
+      event,
+    ]);
 
     if (!result || result.rowCount === 0) {
-      return []
+      return [];
     }
 
-    return await Promise.all(result.rows.map(({ name }) => this.send(name, ...args)))
+    return await Promise.all(
+      result.rows.map(({ name }) => this.send(name, ...args))
+    );
   }
 
-  async offComplete (value) {
-    if (typeof value === 'string') {
-      value = COMPLETION_JOB_PREFIX + value
+  async offComplete(value) {
+    if (typeof value === "string") {
+      value = COMPLETION_JOB_PREFIX + value;
     }
 
-    return await this.offWork(value)
+    return await this.offWork(value);
   }
 
-  async send (...args) {
-    const { name, data, options } = Attorney.checkSendArgs(args, this.config)
-    return await this.createJob(name, data, options)
+  async send(...args) {
+    const { name, data, options } = Attorney.checkSendArgs(args, this.config);
+    return await this.createJob(name, data, options);
   }
 
-  async sendOnce (name, data, options, key) {
-    options = options ? { ...options } : {}
+  async sendOnce(name, data, options, key) {
+    options = options ? { ...options } : {};
 
-    options.singletonKey = key || name
+    options.singletonKey = key || name;
 
-    const result = Attorney.checkSendArgs([name, data, options], this.config)
+    const result = Attorney.checkSendArgs([name, data, options], this.config);
 
-    return await this.createJob(result.name, result.data, result.options)
+    return await this.createJob(result.name, result.data, result.options);
   }
 
-  async sendSingleton (name, data, options) {
-    options = options ? { ...options } : {}
+  async sendSingleton(name, data, options) {
+    options = options ? { ...options } : {};
 
-    options.singletonKey = SINGLETON_QUEUE_KEY
+    options.singletonKey = SINGLETON_QUEUE_KEY;
 
-    const result = Attorney.checkSendArgs([name, data, options], this.config)
+    const result = Attorney.checkSendArgs([name, data, options], this.config);
 
-    return await this.createJob(result.name, result.data, result.options)
+    return await this.createJob(result.name, result.data, result.options);
   }
 
-  async sendAfter (name, data, options, after) {
-    options = options ? { ...options } : {}
-    options.startAfter = after
+  async sendAfter(name, data, options, after) {
+    options = options ? { ...options } : {};
+    options.startAfter = after;
 
-    const result = Attorney.checkSendArgs([name, data, options], this.config)
+    const result = Attorney.checkSendArgs([name, data, options], this.config);
 
-    return await this.createJob(result.name, result.data, result.options)
+    return await this.createJob(result.name, result.data, result.options);
   }
 
-  async sendThrottled (name, data, options, seconds, key) {
-    options = options ? { ...options } : {}
-    options.singletonSeconds = seconds
-    options.singletonNextSlot = false
-    options.singletonKey = key
+  async sendThrottled(name, data, options, seconds, key) {
+    options = options ? { ...options } : {};
+    options.singletonSeconds = seconds;
+    options.singletonNextSlot = false;
+    options.singletonKey = key;
 
-    const result = Attorney.checkSendArgs([name, data, options], this.config)
+    const result = Attorney.checkSendArgs([name, data, options], this.config);
 
-    return await this.createJob(result.name, result.data, result.options)
+    return await this.createJob(result.name, result.data, result.options);
   }
 
-  async sendDebounced (name, data, options, seconds, key) {
-    options = options ? { ...options } : {}
-    options.singletonSeconds = seconds
-    options.singletonNextSlot = true
-    options.singletonKey = key
+  async sendDebounced(name, data, options, seconds, key) {
+    options = options ? { ...options } : {};
+    options.singletonSeconds = seconds;
+    options.singletonNextSlot = true;
+    options.singletonKey = key;
 
-    const result = Attorney.checkSendArgs([name, data, options], this.config)
+    const result = Attorney.checkSendArgs([name, data, options], this.config);
 
-    return await this.createJob(result.name, result.data, result.options)
+    return await this.createJob(result.name, result.data, result.options);
   }
 
-  async createJob (name, data, options, singletonOffset = 0) {
+  async createJob(name, data, options, singletonOffset = 0) {
     const {
       db: wrapper,
       expireIn,
@@ -405,10 +472,10 @@ class Manager extends EventEmitter {
       retryBackoff,
       retryLimit,
       retryDelay,
-      onComplete
-    } = options
+      onComplete,
+    } = options;
 
-    const id = uuid[this.config.uuid]()
+    const id = uuid[this.config.uuid]();
 
     const values = [
       id, // 1
@@ -424,192 +491,233 @@ class Manager extends EventEmitter {
       retryDelay, // 11
       retryBackoff, // 12
       keepUntil, // 13
-      onComplete // 14
-    ]
-    const db = wrapper || this.db
-    const result = await db.executeSql(this.insertJobCommand, values)
+      onComplete, // 14
+    ];
+    const db = wrapper || this.db;
+    const result = await db.executeSql(this.insertJobCommand, values);
 
     if (result && result.rowCount === 1) {
-      return result.rows[0].id
+      return result.rows[0].id;
     }
 
     if (!options.singletonNextSlot) {
-      return null
+      return null;
     }
 
     // delay starting by the offset to honor throttling config
-    options.startAfter = this.getDebounceStartAfter(singletonSeconds, this.timekeeper.clockSkew)
+    options.startAfter = this.getDebounceStartAfter(
+      singletonSeconds,
+      this.timekeeper.clockSkew
+    );
 
     // toggle off next slot config for round 2
-    options.singletonNextSlot = false
+    options.singletonNextSlot = false;
 
-    singletonOffset = singletonSeconds
+    singletonOffset = singletonSeconds;
 
-    return await this.createJob(name, data, options, singletonOffset)
+    return await this.createJob(name, data, options, singletonOffset);
   }
 
-  async insert (jobs, options = {}) {
-    const { db: wrapper } = options
-    const db = wrapper || this.db
-    const checkedJobs = Attorney.checkInsertArgs(jobs)
-    const data = JSON.stringify(checkedJobs)
-    return await db.executeSql(this.insertJobsCommand, [data])
+  async insert(jobs, options = {}) {
+    const { db: wrapper } = options;
+    const db = wrapper || this.db;
+    const checkedJobs = Attorney.checkInsertArgs(jobs);
+    const data = JSON.stringify(checkedJobs);
+    return await db.executeSql(this.insertJobsCommand, [data]);
   }
 
-  getDebounceStartAfter (singletonSeconds, clockOffset) {
-    const debounceInterval = singletonSeconds * 1000
+  getDebounceStartAfter(singletonSeconds, clockOffset) {
+    const debounceInterval = singletonSeconds * 1000;
 
-    const now = Date.now() + clockOffset
+    const now = Date.now() + clockOffset;
 
-    const slot = Math.floor(now / debounceInterval) * debounceInterval
+    const slot = Math.floor(now / debounceInterval) * debounceInterval;
 
     // prevent startAfter=0 during debouncing
-    let startAfter = (singletonSeconds - Math.floor((now - slot) / 1000)) || 1
+    let startAfter = singletonSeconds - Math.floor((now - slot) / 1000) || 1;
 
     if (singletonSeconds > 1) {
-      startAfter++
+      startAfter++;
     }
 
-    return startAfter
+    return startAfter;
   }
 
-  async fetch (name, batchSize, options = {}) {
-    const values = Attorney.checkFetchArgs(name, batchSize, options)
-    const db = options.db || this.db
-    const preparedStatement = this.nextJobCommand(options.includeMetadata || false, options.enforceSingletonQueueActiveLimit || false)
-    const statementValues = [values.name, batchSize || 1]
+  async fetch(name, batchSize, options = {}) {
+    const values = Attorney.checkFetchArgs(name, batchSize, options);
+    const db = options.db || this.db;
+    const preparedStatement = this.nextJobCommand(
+      options.includeMetadata || false,
+      options.enforceSingletonQueueActiveLimit || false
+    );
+    const statementValues = [values.name, batchSize || 1];
 
-    let result
+    let result;
     if (options.enforceSingletonQueueActiveLimit && !options.db) {
       // Prepare/format now and send multi-statement transaction
       const fetchQuery = preparedStatement
-        .replace('$1', Db.quotePostgresStr(statementValues[0]))
-        .replace('$2', statementValues[1].toString())
+        .replace("$1", Db.quotePostgresStr(statementValues[0]))
+        .replace("$2", statementValues[1].toString());
       // eslint-disable-next-line no-unused-vars
-      const [_begin, _setLocal, fetchResult, _commit] = await db.executeSql([
-        'BEGIN',
-        'SET LOCAL jit = OFF', // JIT can slow things down significantly
-        fetchQuery,
-        'COMMIT'
-      ].join(';\n'))
-      result = fetchResult
+      const [_begin, _setLocal, fetchResult, _commit] = await db.executeSql(
+        [
+          "BEGIN",
+          "SET LOCAL jit = OFF", // JIT can slow things down significantly
+          fetchQuery,
+          "COMMIT",
+        ].join(";\n")
+      );
+      result = fetchResult;
     } else {
-      result = await db.executeSql(preparedStatement, statementValues)
+      result = await db.executeSql(preparedStatement, statementValues);
     }
 
     if (!result || result.rows.length === 0) {
-      return null
+      return null;
     }
 
-    return result.rows.length === 1 && !batchSize ? result.rows[0] : result.rows
+    return result.rows.length === 1 && !batchSize
+      ? result.rows[0]
+      : result.rows;
   }
 
-  async fetchCompleted (name, batchSize, options = {}) {
-    return await this.fetch(COMPLETION_JOB_PREFIX + name, batchSize, options)
+  async fetchCompleted(name, batchSize, options = {}) {
+    return await this.fetch(COMPLETION_JOB_PREFIX + name, batchSize, options);
   }
 
-  mapCompletionIdArg (id, funcName) {
-    const errorMessage = `${funcName}() requires an id`
+  mapCompletionIdArg(id, funcName) {
+    const errorMessage = `${funcName}() requires an id`;
 
-    assert(id, errorMessage)
+    assert(id, errorMessage);
 
-    const ids = Array.isArray(id) ? id : [id]
+    const ids = Array.isArray(id) ? id : [id];
 
-    assert(ids.length, errorMessage)
+    assert(ids.length, errorMessage);
 
-    return ids
+    return ids;
   }
 
-  mapCompletionDataArg (data) {
-    if (data === null || typeof data === 'undefined' || typeof data === 'function') { return null }
+  mapCompletionDataArg(data) {
+    if (
+      data === null ||
+      typeof data === "undefined" ||
+      typeof data === "function"
+    ) {
+      return null;
+    }
 
-    const result = (typeof data === 'object' && !Array.isArray(data))
-      ? data
-      : { value: data }
+    const result =
+      typeof data === "object" && !Array.isArray(data) ? data : { value: data };
 
-    return stringify(result)
+    return stringify(result);
   }
 
-  mapCompletionResponse (ids, result) {
+  mapCompletionResponse(ids, result) {
     return {
       jobs: ids,
       requested: ids.length,
-      updated: result && result.rows ? parseInt(result.rows[0].count) : 0
-    }
+      updated: result && result.rows ? parseInt(result.rows[0].count) : 0,
+    };
   }
 
-  async complete (id, data, options = {}) {
-    const db = options.db || this.db
-    const ids = this.mapCompletionIdArg(id, 'complete')
-    const result = await db.executeSql(this.completeJobsCommand, [ids, this.mapCompletionDataArg(data)])
-    return this.mapCompletionResponse(ids, result)
+  async complete(id, data, options = {}) {
+    const db = options.db || this.db;
+    const ids = this.mapCompletionIdArg(id, "complete");
+    const result = await db.executeSql(this.completeJobsCommand, [
+      ids,
+      this.mapCompletionDataArg(data),
+    ]);
+    return this.mapCompletionResponse(ids, result);
   }
 
-  async fail (id, data, options = {}) {
-    const db = options.db || this.db
-    const ids = this.mapCompletionIdArg(id, 'fail')
-    const result = await db.executeSql(this.failJobsCommand, [ids, this.mapCompletionDataArg(data)])
-    return this.mapCompletionResponse(ids, result)
+  async fail(id, data, options = {}) {
+    const db = options.db || this.db;
+    const ids = this.mapCompletionIdArg(id, "fail");
+    const result = await db.executeSql(this.failJobsCommand, [
+      ids,
+      this.mapCompletionDataArg(data),
+    ]);
+    return this.mapCompletionResponse(ids, result);
   }
 
-  async cancel (id, options = {}) {
-    const db = options.db || this.db
-    const ids = this.mapCompletionIdArg(id, 'cancel')
-    const result = await db.executeSql(this.cancelJobsCommand, [ids])
-    return this.mapCompletionResponse(ids, result)
+  async cancel(id, options = {}) {
+    const db = options.db || this.db;
+    const ids = this.mapCompletionIdArg(id, "cancel");
+    const result = await db.executeSql(this.cancelJobsCommand, [ids]);
+    return this.mapCompletionResponse(ids, result);
   }
 
-  async resume (id, options = {}) {
-    const db = options.db || this.db
-    const ids = this.mapCompletionIdArg(id, 'resume')
-    const result = await db.executeSql(this.resumeJobsCommand, [ids])
-    return this.mapCompletionResponse(ids, result)
+  async resume(id, options = {}) {
+    const db = options.db || this.db;
+    const ids = this.mapCompletionIdArg(id, "resume");
+    const result = await db.executeSql(this.resumeJobsCommand, [ids]);
+    return this.mapCompletionResponse(ids, result);
   }
 
-  async deleteQueue (queue, options) {
-    assert(queue, 'Missing queue name argument')
-    const sql = plans.deleteQueue(this.config.schema, options)
-    const result = await this.db.executeSql(sql, [queue])
-    return result ? result.rowCount : null
+  async deleteQueue(queue, options) {
+    assert(queue, "Missing queue name argument");
+    const sql = plans.deleteQueue(this.config.schema, options);
+    const result = await this.db.executeSql(sql, [queue]);
+    return result ? result.rowCount : null;
   }
 
-  async deleteAllQueues (options) {
-    const sql = plans.deleteAllQueues(this.config.schema, options)
-    const result = await this.db.executeSql(sql)
-    return result ? result.rowCount : null
+  async deleteAllQueues(options) {
+    const sql = plans.deleteAllQueues(this.config.schema, options);
+    const result = await this.db.executeSql(sql);
+    return result ? result.rowCount : null;
   }
 
-  async clearStorage () {
-    const sql = plans.clearStorage(this.config.schema)
-    await this.db.executeSql(sql)
+  async clearStorage() {
+    const sql = plans.clearStorage(this.config.schema);
+    await this.db.executeSql(sql);
   }
 
-  async getQueueSize (queue, options) {
-    assert(queue, 'Missing queue name argument')
+  async getQueueSize(queue, options) {
+    assert(queue, "Missing queue name argument");
 
-    const sql = plans.getQueueSize(this.config.schema, options)
+    const sql = plans.getQueueSize(this.config.schema, options);
 
-    const result = await this.db.executeSql(sql, [queue])
+    const result = await this.db.executeSql(sql, [queue]);
 
-    return result ? parseFloat(result.rows[0].count) : null
+    return result ? parseFloat(result.rows[0].count) : null;
   }
 
-  async getJobById (id, options = {}) {
-    const db = options.db || this.db
-    const result1 = await db.executeSql(this.getJobByIdCommand, [id])
+  async getJobById(id, options = {}) {
+    const db = options.db || this.db;
+    const result1 = await db.executeSql(this.getJobByIdCommand, [id]);
 
     if (result1 && result1.rows && result1.rows.length === 1) {
-      return result1.rows[0]
+      return result1.rows[0];
     }
 
-    const result2 = await db.executeSql(this.getArchivedJobByIdCommand, [id])
+    const result2 = await db.executeSql(this.getArchivedJobByIdCommand, [id]);
 
     if (result2 && result2.rows && result2.rows.length === 1) {
-      return result2.rows[0]
+      return result2.rows[0];
     }
 
-    return null
+    return null;
+  }
+
+  async getJobBySingletonKey(singletonKey, options = {}) {
+    const db = options.db || this.db;
+    const result1 = await db.executeSql(this.getJobBySingletonKeyCommand, [id]);
+
+    if (result1 && result1.rows && result1.rows.length === 1) {
+      return result1.rows[0];
+    }
+
+    const result2 = await db.executeSql(
+      this.getArchivedJobBySingletonKeyCommand,
+      [id]
+    );
+
+    if (result2 && result2.rows && result2.rows.length === 1) {
+      return result2.rows[0];
+    }
+
+    return null;
   }
 }
 
-module.exports = Manager
+module.exports = Manager;

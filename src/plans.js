@@ -1,22 +1,22 @@
-const assert = require('assert')
+const assert = require("assert");
 
 const states = {
-  created: 'created',
-  retry: 'retry',
-  active: 'active',
-  completed: 'completed',
-  expired: 'expired',
-  cancelled: 'cancelled',
-  failed: 'failed'
-}
+  created: "created",
+  retry: "retry",
+  active: "active",
+  completed: "completed",
+  expired: "expired",
+  cancelled: "cancelled",
+  failed: "failed",
+};
 
-const DEFAULT_SCHEMA = 'pgboss'
-const COMPLETION_JOB_PREFIX = `__state__${states.completed}__`
-const SINGLETON_QUEUE_KEY = '__pgboss__singleton_queue'
-const SINGLETON_QUEUE_KEY_ESCAPED = SINGLETON_QUEUE_KEY.replace(/_/g, '\\_')
+const DEFAULT_SCHEMA = "pgboss";
+const COMPLETION_JOB_PREFIX = `__state__${states.completed}__`;
+const SINGLETON_QUEUE_KEY = "__pgboss__singleton_queue";
+const SINGLETON_QUEUE_KEY_ESCAPED = SINGLETON_QUEUE_KEY.replace(/_/g, "\\_");
 
-const MIGRATE_RACE_MESSAGE = 'division by zero'
-const CREATE_RACE_MESSAGE = 'already exists'
+const MIGRATE_RACE_MESSAGE = "division by zero";
+const CREATE_RACE_MESSAGE = "already exists";
 
 module.exports = {
   create,
@@ -54,17 +54,18 @@ module.exports = {
   assertMigration,
   getArchivedJobById,
   getJobById,
+  getJobBySingletonKey,
   states: { ...states },
   COMPLETION_JOB_PREFIX,
   SINGLETON_QUEUE_KEY,
   MIGRATE_RACE_MESSAGE,
   CREATE_RACE_MESSAGE,
-  DEFAULT_SCHEMA
-}
+  DEFAULT_SCHEMA,
+};
 
-function locked (schema, query) {
+function locked(schema, query) {
   if (Array.isArray(query)) {
-    query = query.join(';\n')
+    query = query.join(";\n");
   }
 
   return `
@@ -73,10 +74,10 @@ function locked (schema, query) {
     ${advisoryLock(schema)};
     ${query};
     COMMIT;
-  `
+  `;
 }
 
-function create (schema, version) {
+function create(schema, version) {
   const commands = [
     createSchema(schema),
     createVersionTable(schema),
@@ -94,29 +95,29 @@ function create (schema, version) {
     createIndexSingletonKeyOn(schema),
     createIndexSingletonKey(schema),
     createIndexSingletonQueue(schema),
-    insertVersion(schema, version)
-  ]
+    insertVersion(schema, version),
+  ];
 
-  return locked(schema, commands)
+  return locked(schema, commands);
 }
 
-function createSchema (schema) {
+function createSchema(schema) {
   return `
     CREATE SCHEMA IF NOT EXISTS ${schema}
-  `
+  `;
 }
 
-function createVersionTable (schema) {
+function createVersionTable(schema) {
   return `
     CREATE TABLE ${schema}.version (
       version int primary key,
       maintained_on timestamp with time zone,
       cron_on timestamp with time zone
     )
-  `
+  `;
 }
 
-function createJobStateEnum (schema) {
+function createJobStateEnum(schema) {
   // ENUM definition order is important
   // base type is numeric and first values are less than last values
   return `
@@ -129,10 +130,10 @@ function createJobStateEnum (schema) {
       '${states.cancelled}',
       '${states.failed}'
     )
-  `
+  `;
 }
 
-function createJobTable (schema) {
+function createJobTable(schema) {
   return `
     CREATE TABLE ${schema}.job (
       id uuid primary key not null default gen_random_uuid(),
@@ -155,105 +156,105 @@ function createJobTable (schema) {
       on_complete boolean not null default false,
       output jsonb
     )
-  `
+  `;
 }
 
-function cloneJobTableForArchive (schema) {
-  return `CREATE TABLE ${schema}.archive (LIKE ${schema}.job)`
+function cloneJobTableForArchive(schema) {
+  return `CREATE TABLE ${schema}.archive (LIKE ${schema}.job)`;
 }
 
-function addArchivedOnToArchive (schema) {
-  return `ALTER TABLE ${schema}.archive ADD archivedOn timestamptz NOT NULL DEFAULT now()`
+function addArchivedOnToArchive(schema) {
+  return `ALTER TABLE ${schema}.archive ADD archivedOn timestamptz NOT NULL DEFAULT now()`;
 }
 
-function addArchivedOnIndexToArchive (schema) {
-  return `CREATE INDEX archive_archivedon_idx ON ${schema}.archive(archivedon)`
+function addArchivedOnIndexToArchive(schema) {
+  return `CREATE INDEX archive_archivedon_idx ON ${schema}.archive(archivedon)`;
 }
 
-function addIdIndexToArchive (schema) {
-  return `CREATE INDEX archive_id_idx ON ${schema}.archive(id)`
+function addIdIndexToArchive(schema) {
+  return `CREATE INDEX archive_id_idx ON ${schema}.archive(id)`;
 }
 
-function setMaintenanceTime (schema) {
-  return `UPDATE ${schema}.version SET maintained_on = now()`
+function setMaintenanceTime(schema) {
+  return `UPDATE ${schema}.version SET maintained_on = now()`;
 }
 
-function getMaintenanceTime (schema) {
-  return `SELECT maintained_on, EXTRACT( EPOCH FROM (now() - maintained_on) ) seconds_ago FROM ${schema}.version`
+function getMaintenanceTime(schema) {
+  return `SELECT maintained_on, EXTRACT( EPOCH FROM (now() - maintained_on) ) seconds_ago FROM ${schema}.version`;
 }
 
-function setCronTime (schema, time) {
-  time = time || 'now()'
-  return `UPDATE ${schema}.version SET cron_on = ${time}`
+function setCronTime(schema, time) {
+  time = time || "now()";
+  return `UPDATE ${schema}.version SET cron_on = ${time}`;
 }
 
-function getCronTime (schema) {
-  return `SELECT cron_on, EXTRACT( EPOCH FROM (now() - cron_on) ) seconds_ago FROM ${schema}.version`
+function getCronTime(schema) {
+  return `SELECT cron_on, EXTRACT( EPOCH FROM (now() - cron_on) ) seconds_ago FROM ${schema}.version`;
 }
 
-function deleteQueue (schema, options = {}) {
-  options.before = options.before || states.active
-  assert(options.before in states, `${options.before} is not a valid state`)
-  return `DELETE FROM ${schema}.job WHERE name = $1 and state < '${options.before}'`
+function deleteQueue(schema, options = {}) {
+  options.before = options.before || states.active;
+  assert(options.before in states, `${options.before} is not a valid state`);
+  return `DELETE FROM ${schema}.job WHERE name = $1 and state < '${options.before}'`;
 }
 
-function deleteAllQueues (schema, options = {}) {
-  options.before = options.before || states.active
-  assert(options.before in states, `${options.before} is not a valid state`)
-  return `DELETE FROM ${schema}.job WHERE state < '${options.before}'`
+function deleteAllQueues(schema, options = {}) {
+  options.before = options.before || states.active;
+  assert(options.before in states, `${options.before} is not a valid state`);
+  return `DELETE FROM ${schema}.job WHERE state < '${options.before}'`;
 }
 
-function clearStorage (schema) {
-  return `TRUNCATE ${schema}.job, ${schema}.archive`
+function clearStorage(schema) {
+  return `TRUNCATE ${schema}.job, ${schema}.archive`;
 }
 
-function getQueueSize (schema, options = {}) {
-  options.before = options.before || states.active
-  assert(options.before in states, `${options.before} is not a valid state`)
-  return `SELECT count(*) as count FROM ${schema}.job WHERE name = $1 AND state < '${options.before}'`
+function getQueueSize(schema, options = {}) {
+  options.before = options.before || states.active;
+  assert(options.before in states, `${options.before} is not a valid state`);
+  return `SELECT count(*) as count FROM ${schema}.job WHERE name = $1 AND state < '${options.before}'`;
 }
 
-function createIndexSingletonKey (schema) {
+function createIndexSingletonKey(schema) {
   // anything with singletonKey means "only 1 job can be queued or active at a time"
   return `
     CREATE UNIQUE INDEX job_singletonKey ON ${schema}.job (name, singletonKey) WHERE state < '${states.completed}' AND singletonOn IS NULL AND NOT singletonKey LIKE '${SINGLETON_QUEUE_KEY_ESCAPED}%'
-  `
+  `;
 }
 
-function createIndexSingletonQueue (schema) {
+function createIndexSingletonQueue(schema) {
   // "singleton queue" means "only 1 job can be queued at a time"
   return `
     CREATE UNIQUE INDEX job_singleton_queue ON ${schema}.job (name, singletonKey) WHERE state < '${states.active}' AND singletonOn IS NULL AND singletonKey LIKE '${SINGLETON_QUEUE_KEY_ESCAPED}%'
-  `
+  `;
 }
 
-function createIndexSingletonOn (schema) {
+function createIndexSingletonOn(schema) {
   // anything with singletonOn means "only 1 job within this time period, queued, active or completed"
   return `
     CREATE UNIQUE INDEX job_singletonOn ON ${schema}.job (name, singletonOn) WHERE state < '${states.expired}' AND singletonKey IS NULL
-  `
+  `;
 }
 
-function createIndexSingletonKeyOn (schema) {
+function createIndexSingletonKeyOn(schema) {
   // anything with both singletonOn and singletonKey means "only 1 job within this time period with this key, queued, active or completed"
   return `
     CREATE UNIQUE INDEX job_singletonKeyOn ON ${schema}.job (name, singletonOn, singletonKey) WHERE state < '${states.expired}'
-  `
+  `;
 }
 
-function createIndexJobName (schema) {
+function createIndexJobName(schema) {
   return `
     CREATE INDEX job_name ON ${schema}.job (name text_pattern_ops)
-  `
+  `;
 }
 
-function createIndexJobFetch (schema) {
+function createIndexJobFetch(schema) {
   return `
     CREATE INDEX job_fetch ON ${schema}.job (name text_pattern_ops, startAfter) WHERE state < '${states.active}'
-  `
+  `;
 }
 
-function createScheduleTable (schema) {
+function createScheduleTable(schema) {
   return `
     CREATE TABLE ${schema}.schedule (
       name text primary key,
@@ -264,10 +265,10 @@ function createScheduleTable (schema) {
       created_on timestamp with time zone not null default now(),
       updated_on timestamp with time zone not null default now()
     )
-  `
+  `;
 }
 
-function createSubscriptionTable (schema) {
+function createSubscriptionTable(schema) {
   return `
     CREATE TABLE ${schema}.subscription (
       event text not null,
@@ -276,16 +277,16 @@ function createSubscriptionTable (schema) {
       updated_on timestamp with time zone not null default now(),
       PRIMARY KEY(event, name)
     )
-  `
+  `;
 }
 
-function getSchedules (schema) {
+function getSchedules(schema) {
   return `
     SELECT * FROM ${schema}.schedule
-  `
+  `;
 }
 
-function schedule (schema) {
+function schedule(schema) {
   return `
     INSERT INTO ${schema}.schedule (name, cron, timezone, data, options)
     VALUES ($1, $2, $3, $4, $5)
@@ -295,17 +296,17 @@ function schedule (schema) {
       data = EXCLUDED.data,
       options = EXCLUDED.options,
       updated_on = now()
-  `
+  `;
 }
 
-function unschedule (schema) {
+function unschedule(schema) {
   return `
     DELETE FROM ${schema}.schedule
     WHERE name = $1
-  `
+  `;
 }
 
-function subscribe (schema) {
+function subscribe(schema) {
   return `
     INSERT INTO ${schema}.subscription (event, name)
     VALUES ($1, $2)
@@ -313,44 +314,44 @@ function subscribe (schema) {
       event = EXCLUDED.event,
       name = EXCLUDED.name,
       updated_on = now()
-  `
+  `;
 }
 
-function unsubscribe (schema) {
+function unsubscribe(schema) {
   return `
     DELETE FROM ${schema}.subscription
     WHERE event = $1 and name = $2
-  `
+  `;
 }
 
-function getQueuesForEvent (schema) {
+function getQueuesForEvent(schema) {
   return `
     SELECT name FROM ${schema}.subscription
     WHERE event = $1
-  `
+  `;
 }
 
-function getTime () {
-  return "SELECT round(date_part('epoch', now()) * 1000) as time"
+function getTime() {
+  return "SELECT round(date_part('epoch', now()) * 1000) as time";
 }
 
-function getVersion (schema) {
-  return `SELECT version from ${schema}.version`
+function getVersion(schema) {
+  return `SELECT version from ${schema}.version`;
 }
 
-function setVersion (schema, version) {
-  return `UPDATE ${schema}.version SET version = '${version}'`
+function setVersion(schema, version) {
+  return `UPDATE ${schema}.version SET version = '${version}'`;
 }
 
-function versionTableExists (schema) {
-  return `SELECT to_regclass('${schema}.version') as name`
+function versionTableExists(schema) {
+  return `SELECT to_regclass('${schema}.version') as name`;
 }
 
-function insertVersion (schema, version) {
-  return `INSERT INTO ${schema}.version(version) VALUES ('${version}')`
+function insertVersion(schema, version) {
+  return `INSERT INTO ${schema}.version(version) VALUES ('${version}')`;
 }
 
-function fetchNextJob (schema) {
+function fetchNextJob(schema) {
   return (includeMetadata, enforceSingletonQueueActiveLimit) => `
     WITH nextJob as (
       SELECT id
@@ -358,8 +359,9 @@ function fetchNextJob (schema) {
       WHERE state < '${states.active}'
         AND name LIKE $1
         AND startAfter < now()
-        ${enforceSingletonQueueActiveLimit
-        ? `AND (
+        ${
+          enforceSingletonQueueActiveLimit
+            ? `AND (
           CASE
             WHEN singletonKey IS NOT NULL
               AND singletonKey LIKE '${SINGLETON_QUEUE_KEY_ESCAPED}%'
@@ -375,7 +377,8 @@ function fetchNextJob (schema) {
               true
           END
         )`
-        : ''}
+            : ""
+        }
       ORDER BY priority desc, createdOn, id
       LIMIT $2
       FOR UPDATE SKIP LOCKED
@@ -383,32 +386,36 @@ function fetchNextJob (schema) {
     UPDATE ${schema}.job j SET
       state = '${states.active}',
       startedOn = now(),
-      retryCount = CASE WHEN state = '${states.retry}' THEN retryCount + 1 ELSE retryCount END
+      retryCount = CASE WHEN state = '${
+        states.retry
+      }' THEN retryCount + 1 ELSE retryCount END
     FROM nextJob
     WHERE j.id = nextJob.id
-    RETURNING ${includeMetadata ? 'j.*' : 'j.id, name, data'}, EXTRACT(epoch FROM expireIn) as expire_in_seconds
-  `
+    RETURNING ${
+      includeMetadata ? "j.*" : "j.id, name, data"
+    }, EXTRACT(epoch FROM expireIn) as expire_in_seconds
+  `;
 }
 
-function buildJsonCompletionObject (withResponse) {
+function buildJsonCompletionObject(withResponse) {
   // job completion contract
   return `jsonb_build_object(
     'request', jsonb_build_object('id', id, 'name', name, 'data', data),
-    'response', ${withResponse ? '$2::jsonb' : 'null'},
+    'response', ${withResponse ? "$2::jsonb" : "null"},
     'state', state,
     'retryCount', retryCount,
     'createdOn', createdOn,
     'startedOn', startedOn,
     'completedOn', completedOn,
     'failed', CASE WHEN state = '${states.completed}' THEN false ELSE true END
-  )`
+  )`;
 }
 
 const retryCompletedOnCase = `CASE
           WHEN retryCount < retryLimit
           THEN NULL
           ELSE now()
-          END`
+          END`;
 
 const retryStartAfterCase = `CASE
           WHEN retryCount = retryLimit THEN startAfter
@@ -420,11 +427,11 @@ const retryStartAfterCase = `CASE
                 retryDelay * 2 ^ LEAST(16, retryCount + 1) / 2 * random()
             )
             * interval '1'
-          END`
+          END`;
 
-const keepUntilInheritance = 'keepUntil + (keepUntil - startAfter)'
+const keepUntilInheritance = "keepUntil + (keepUntil - startAfter)";
 
-function completeJobs (schema) {
+function completeJobs(schema) {
   return `
     WITH results AS (
       UPDATE ${schema}.job
@@ -445,10 +452,10 @@ function completeJobs (schema) {
         AND on_complete
     )
     SELECT COUNT(*) FROM results
-  `
+  `;
 }
 
-function failJobs (schema) {
+function failJobs(schema) {
   return `
     WITH results AS (
       UPDATE ${schema}.job
@@ -475,15 +482,17 @@ function failJobs (schema) {
         AND on_complete
     )
     SELECT COUNT(*) FROM results
-  `
+  `;
 }
 
-function expire (schema) {
+function expire(schema) {
   return `
     WITH results AS (
       UPDATE ${schema}.job
       SET state = CASE
-          WHEN retryCount < retryLimit THEN '${states.retry}'::${schema}.job_state
+          WHEN retryCount < retryLimit THEN '${
+            states.retry
+          }'::${schema}.job_state
           ELSE '${states.expired}'::${schema}.job_state
           END,
         completedOn = ${retryCompletedOnCase},
@@ -501,10 +510,10 @@ function expire (schema) {
     WHERE state = '${states.expired}'
       AND NOT name LIKE '${COMPLETION_JOB_PREFIX}%'
       AND on_complete
-  `
+  `;
 }
 
-function cancelJobs (schema) {
+function cancelJobs(schema) {
   return `
     with results as (
       UPDATE ${schema}.job
@@ -515,10 +524,10 @@ function cancelJobs (schema) {
       RETURNING 1
     )
     SELECT COUNT(*) from results
-  `
+  `;
 }
 
-function resumeJobs (schema) {
+function resumeJobs(schema) {
   return `
     with results as (
       UPDATE ${schema}.job
@@ -528,10 +537,10 @@ function resumeJobs (schema) {
       RETURNING 1
     )
     SELECT COUNT(*) from results
-  `
+  `;
 }
 
-function insertJob (schema) {
+function insertJob(schema) {
   return `
     INSERT INTO ${schema}.job (
       id,
@@ -600,10 +609,10 @@ function insertJob (schema) {
     ) j3
     ON CONFLICT DO NOTHING
     RETURNING id
-  `
+  `;
 }
 
-function insertJobs (schema) {
+function insertJobs(schema) {
   return `
     INSERT INTO ${schema}.job (
       id,
@@ -647,17 +656,21 @@ function insertJobs (schema) {
       "onComplete" boolean
     )
     ON CONFLICT DO NOTHING
-  `
+  `;
 }
 
-function purge (schema, interval) {
+function purge(schema, interval) {
   return `
     DELETE FROM ${schema}.archive
     WHERE archivedOn < (now() - interval '${interval}')
-  `
+  `;
 }
 
-function archive (schema, completedInterval, failedInterval = completedInterval) {
+function archive(
+  schema,
+  completedInterval,
+  failedInterval = completedInterval
+) {
   return `
     WITH archived_rows AS (
       DELETE FROM ${schema}.job
@@ -678,36 +691,44 @@ function archive (schema, completedInterval, failedInterval = completedInterval)
     SELECT
       id, name, priority, data, state, retryLimit, retryCount, retryDelay, retryBackoff, startAfter, startedOn, singletonKey, singletonOn, expireIn, createdOn, completedOn, keepUntil, on_complete, output
     FROM archived_rows
-  `
+  `;
 }
 
-function countStates (schema) {
+function countStates(schema) {
   return `
     SELECT name, state, count(*) size
     FROM ${schema}.job
     GROUP BY rollup(name), rollup(state)
-  `
+  `;
 }
 
-function advisoryLock (schema) {
+function advisoryLock(schema) {
   return `SELECT pg_advisory_xact_lock(
       ('x' || md5(current_database() || '.pgboss.${schema}'))::bit(64)::bigint
-  )`
+  )`;
 }
 
-function assertMigration (schema, version) {
+function assertMigration(schema, version) {
   // raises 'division by zero' if already on desired schema version
-  return `SELECT version::int/(version::int-${version}) from ${schema}.version`
+  return `SELECT version::int/(version::int-${version}) from ${schema}.version`;
 }
 
-function getJobById (schema) {
-  return getJobByTableAndId(schema, 'job')
+function getJobById(schema) {
+  return getJobByTableAndId(schema, "job");
 }
 
-function getArchivedJobById (schema) {
-  return getJobByTableAndId(schema, 'archive')
+function getJobBySingletonKey(schema) {
+  return getJobByTableAndSingletonKey(schema, "job");
 }
 
-function getJobByTableAndId (schema, table) {
-  return `SELECT * From ${schema}.${table} WHERE id = $1`
+function getArchivedJobById(schema) {
+  return getJobByTableAndId(schema, "archive");
+}
+
+function getJobByTableAndId(schema, table) {
+  return `SELECT * From ${schema}.${table} WHERE id = $1`;
+}
+
+function getJobByTableAndSingletonKey(schema, table) {
+  return `SELECT * From ${schema}.${table} WHERE singletonkey = $1`;
 }
